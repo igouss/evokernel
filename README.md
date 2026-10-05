@@ -108,13 +108,15 @@ A form is refused before evaluation if it contains:
   is refused; `(defun reverse-string ...)` interns in `WORLD` and is fine
 - any symbol in the current goal's `:forbidden` list
 
-Plus `*read-eval*` is nil and every eval, example, and property check runs under a 5 s wall-clock
-leash (`sb-ext:with-timeout`).
+Plus `*read-eval*` is nil. Evals, examples and property checks have no time limit by default: a
+looping form hangs the run until you press Ctrl-C, which restores the pre-turn heap. Set
+`evo.kernel:*eval-timeout*` to a number of seconds to put them back on a wall-clock leash.
 
 **This is a blacklist, not a sandbox.** Be honest with yourself about that. The model can still:
 allocate until the heap dies (`--dynamic-space-size` is your friend), spin a thread via a CL symbol
-I forgot, or find a symbol I didn't think of. The timeout does not stop allocation. If you point a
-hostile model at this, run it in a container with a memory limit, which you were going to do anyway.
+I forgot, or find a symbol I didn't think of. A timeout, if you set one, does not stop allocation.
+If you point a hostile model at this, run it in a container with a memory limit, which you were
+going to do anyway.
 
 ## What the model sees (`observe`)
 

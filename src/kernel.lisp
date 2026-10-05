@@ -17,7 +17,7 @@
 (defpackage :evo.kernel
   (:use :cl)
   (:export #:*state* #:*definitions* #:*properties* #:*budget* #:*generation* #:*revisions*
-           #:*model* #:*auto-abort* #:*project-root* #:*log*
+           #:*model* #:*auto-abort* #:*eval-timeout* #:*project-root* #:*log*
            #:defgoal #:find-goal #:list-goals #:goal #:goal-name #:goal-description
            #:defproperty #:property-report
            #:run #:observe #:ask-model #:locked-p #:snapshot #:restore #:invariants #:goal-satisfied-p
@@ -55,7 +55,7 @@
                            *default-pathname-defaults*))
 (defvar *log* *standard-output*)
 (defvar *feedback* '() "Recent (turn . message) failures fed back to the model.")
-(defvar *eval-timeout* 5 "Seconds a single model-supplied form may run.")
+(defvar *eval-timeout* nil "Seconds a model form, example or property check may run; NIL = no limit.")
 (defvar *max-feedback* 6)
 (defvar *base-snap* nil "Snapshot of the world right after seed + goals loaded. Rollback starts here.")
 
@@ -186,13 +186,18 @@
   snap)
 
 ;;; ------------------------------------------------------------------
-;;; Eval, with a leash
+;;; Eval, with an optional leash
 ;;; ------------------------------------------------------------------
 
-(defun evaluate (form &key (timeout *eval-timeout*))
-  "Evaluate FORM inside WORLD with a wall-clock leash. Records definitions."
+(defmacro with-leash (&body body)
+  "BODY under *EVAL-TIMEOUT* seconds, or unbounded when it is NIL (SB-EXT:WITH-TIMEOUT rejects NIL)."
+  `(flet ((leashed () ,@body))
+     (if *eval-timeout* (sb-ext:with-timeout *eval-timeout* (leashed)) (leashed))))
+
+(defun evaluate (form)
+  "Evaluate FORM inside WORLD under WITH-LEASH. Records definitions."
   (let ((*package* (find-package :world)))
-    (prog1 (sb-ext:with-timeout timeout (eval form))
+    (prog1 (with-leash (eval form))
       (record-definitions form))))
 
 (defun record-definitions (form)
@@ -226,7 +231,7 @@
 
 (defun check-thunk (thunk)
   "Run THUNK -> (values pass-p detail)."
-  (handler-case (sb-ext:with-timeout *eval-timeout*
+  (handler-case (with-leash
                   (let ((*package* (find-package :world)))
                     (values (and (funcall thunk) t) nil)))
     (serious-condition (c) (values nil (format nil "~a" c)))))
@@ -263,7 +268,7 @@
   (let ((failures '()) (world (find-package :world)))
     (flet ((try (form expected)
              (multiple-value-bind (ok detail)
-                 (handler-case (sb-ext:with-timeout *eval-timeout*
+                 (handler-case (with-leash
                                  (let ((*package* world))
                                    (let ((got (eval form)))
                                      (if (equal got expected)
@@ -278,7 +283,7 @@
         (loop repeat (goal-trials goal)
               for x = (funcall (goal-generator goal))
               do (multiple-value-bind (ok detail)
-                     (handler-case (sb-ext:with-timeout *eval-timeout*
+                     (handler-case (with-leash
                                      (let ((*package* world))
                                        (values (funcall (goal-property goal) x) nil)))
                        (serious-condition (c) (values nil (format nil "~a" c))))
@@ -333,7 +338,6 @@ Rules the kernel enforces (a violation wastes the turn, the heap is restored):
 - State lives in the hash table *state* (keyword keys). Mutate it with (setf (gethash :k *state*) v).
 - Every safety property must still pass after your form. Otherwise it is rolled back.
 - Wrap several definitions in one (progn ...) if you must, but prefer one defun per turn.
-- Your form has a 5 second wall-clock leash.
 The loop ends when every fixed case and generated case of the goal passes. Read the GOAL STATUS
 section: it tells you exactly which cases still fail. Fix those.")
 
