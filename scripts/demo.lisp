@@ -3,9 +3,9 @@
 ;;;; Turn 1: model tries to cheat with REVERSE          -> LOCKED, heap untouched
 ;;;; Turn 2: model writes a buggy reverse-string         -> accepted (no safety property broke), goal still fails
 ;;;; Turn 3: model breaks the safety property           -> REJECTED, heap restored
-;;;; Turn 4: model writes a correct reverse-string      -> goal satisfied, revision 2 committed to git
-;;;; Then: fresh SBCL verifies revision 2; rollback to revision 1 removes reverse-string but keeps
-;;;; the counter demo; rollback to revision 2 brings it back. All without restarting this image.
+;;;; Turn 4: model writes a correct reverse-string      -> goal satisfied, a new revision committed to git
+;;;; Then: fresh SBCL verifies that revision; rollback to the seed removes reverse-string but keeps
+;;;; the counter demo; rolling forward brings it back. All without restarting this image.
 
 (in-package :evo.kernel)
 
@@ -35,24 +35,27 @@
 
 (format t "~&~a~%" (status-line))
 
+(defvar *seed* *current-revision*)
+
 (say "RUN goal reverse-string")
-(let ((rev (run "reverse-string")))
-  (assert rev () "demo: goal was not satisfied"))
+(defvar *solved* (run "reverse-string"))
+(assert *solved* () "demo: goal was not satisfied")
 (format t "~&~a~%" (status-line))
 (format t "~&(reverse-string \"evokernel\") => ~s~%" (world::reverse-string "evokernel"))
 
-(say "fresh-process verification of revision 2")
-(assert (verify-fresh 2 "reverse-string") () "demo: fresh process failed")
+(say "fresh-process verification of revision ~d" (revision-number *solved*))
+(assert (verify-fresh *solved* "reverse-string") () "demo: fresh process failed")
 
-(say "rollback to revision 1 (the seed) — reverse-string must vanish, counter must survive")
-(rollback 1)
+(say "rollback to revision ~d (the seed) — reverse-string must vanish, counter must survive"
+     (revision-number *seed*))
+(rollback *seed*)
 (format t "~&(fboundp 'reverse-string) => ~s   (counter) => ~s~%"
         (fboundp 'world::reverse-string) (world::counter))
 (assert (not (fboundp 'world::reverse-string)))
 (assert (eql 0 (world::counter)))
 
-(say "roll forward to revision 2 — it's back")
-(rollback 2)
+(say "roll forward to revision ~d — it's back" (revision-number *solved*))
+(rollback *solved*)
 (format t "~&(reverse-string \"evokernel\") => ~s~%" (world::reverse-string "evokernel"))
 (assert (string= "lenrekove" (world::reverse-string "evokernel")))
 

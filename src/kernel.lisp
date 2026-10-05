@@ -21,7 +21,8 @@
            #:defgoal #:find-goal #:list-goals #:goal #:goal-name #:goal-description
            #:defproperty #:property-report
            #:run #:observe #:ask-model #:locked-p #:snapshot #:restore #:invariants #:goal-satisfied-p
-           #:commit-revision #:rollback #:revision #:revision-number #:revision-id #:revision-generation #:revision-file
+           #:commit-revision #:load-revision-history #:ensure-seed #:rollback
+           #:revision #:revision-number #:revision-id #:revision-generation #:revision-file
            #:verify-fresh #:verify-in-process #:status-line #:evaluate #:seed-world #:freeze-base
            #:locked-form #:invariant-violation #:budget-exhausted))
 
@@ -438,10 +439,20 @@ section: it tells you exactly which cases still fail. Fix those.")
   (handler-case (run-cmd "git" args)
     (error (c) (values 127 (format nil "~a" c)))))
 
+(defun revision-files ()
+  (directory (merge-pathnames "rev-*.lisp" (revision-dir))))
+
+(defun next-revision-number ()
+  "One past the highest revision in memory or on disk, so no session reuses another's number."
+  (1+ (reduce #'max (append (mapcar #'revision-number *revisions*)
+                            (mapcar (lambda (f) (parse-integer (pathname-name f) :start 4)) (revision-files)))
+              :initial-value 0)))
+
 (defun write-revision-file (rev)
+  "Write REV to a new file. A revision file is never overwritten: :IF-EXISTS :ERROR."
   (ensure-directories-exist (revision-dir))
   (let ((path (merge-pathnames (format nil "rev-~4,'0d.lisp" (revision-number rev)) (revision-dir))))
-    (with-open-file (s path :direction :output :if-exists :supersede)
+    (with-open-file (s path :direction :output :if-exists :error)
       (let ((*package* (find-package :world)) (*print-case* :downcase) (*print-right-margin* 100))
         (format s ";;;; ~a~%;;;; generation ~d  goal ~a  ~a~%;;;; Grown by the model, dumped by the kernel. Diff me.~%~%"
                 (revision-id rev) (revision-generation rev) (revision-goal rev) (revision-created rev))
@@ -453,7 +464,7 @@ section: it tells you exactly which cases still fail. Fix those.")
         (format s "(evo.kernel::install-loaded-revision ~s ~d ~s '~s)~%"
                 (revision-id rev) (revision-generation rev) (revision-goal rev)
                 (mapcar #'car (revision-definitions rev)))))
-    path))
+    (truename path)))
 
 (defun revision-from-forms (forms file)
   "The revision that FORMS, read from a revision FILE, describe. Nothing is evaluated: the trailing
@@ -483,10 +494,11 @@ section: it tells you exactly which cases still fail. Fix those.")
    observe/dump/commit) keep working in this image. The arguments are data for
    REVISION-FROM-FORMS; the file itself is the source of truth."
   (declare (ignore id generation goal def-names))
-  (let ((rev (read-revision-file *load-truename*)))
+  (let* ((file (truename *load-truename*))
+         (rev (or (find file *revisions* :key #'revision-file :test #'equal)
+                  (first (push (read-revision-file file) *revisions*)))))
     (setf *generation* (revision-generation rev)
           *definitions* (copy-list (revision-definitions rev)))
-    (push rev *revisions*)
     (setf *current-revision* rev)
     (logf ";; loaded revision ~a (generation ~d)" (revision-id rev) (revision-generation rev))
     (revision-id rev)))
@@ -509,35 +521,44 @@ section: it tells you exactly which cases still fail. Fix those.")
   (let ((orphans (unsourced-functions)))
     (when orphans
       (error "refusing to commit: ~{~s~^, ~} live in the heap with no recorded source — the file would lie" orphans)))
-  (let* ((defs (copy-list *definitions*))
-         (id (format nil "revision-~d-~d" (sxhash (definitions-source)) *generation*))
-         (rev (make-revision :number (1+ (length *revisions*)) :id id :generation *generation*
+  (let* ((id (heap-revision-id))
+         (rev (make-revision :number (next-revision-number) :id id :generation *generation*
                              :goal (string goal-name)
-                             :definitions defs :state (table->plist world::*state*)
+                             :definitions (copy-list *definitions*) :state (table->plist world::*state*)
                              :created (iso-now))))
+    (setf (revision-file rev) (write-revision-file rev))
     (push rev *revisions*)
     (setf *current-revision* rev)
-    (setf (revision-file rev) (write-revision-file rev))
     (multiple-value-bind (code out) (git "rev-parse" "--is-inside-work-tree")
       (declare (ignore out))
       (unless (zerop code) (git "init" "-q")))
     (git "add" (namestring (revision-file rev)))
-    (multiple-value-bind (code staged) (git "diff" "--cached" "--name-only" "--" (namestring (revision-file rev)))
-      (declare (ignore code))
-      (if (zerop (length staged))
-          (logf ";; ~a unchanged on disk, nothing to commit" (file-namestring (revision-file rev)))
-          (multiple-value-bind (code out)
-              (git "-c" "user.name=evokernel" "-c" "user.email=evokernel@localhost"
-                   "commit" "-q" "--only" "-m"
-                   (format nil "~a: ~a (generation ~d)" (revision-id rev) goal-name *generation*)
-                   "--" (namestring (revision-file rev)))
-            (if (zerop code)
-                (multiple-value-bind (c sha) (git "rev-parse" "--short" "HEAD")
-                  (declare (ignore c))
-                  (setf (revision-sha rev) sha)
-                  (logf ";; committed ~a -> ~a  git ~a" id (file-namestring (revision-file rev)) sha))
-                (logf ";; wrote ~a (git commit failed: ~a)" (file-namestring (revision-file rev)) out)))))
+    (multiple-value-bind (code out)
+        (git "-c" "user.name=evokernel" "-c" "user.email=evokernel@localhost"
+             "commit" "-q" "--only" "-m"
+             (format nil "~a: ~a (generation ~d)" (revision-id rev) goal-name *generation*)
+             "--" (namestring (revision-file rev)))
+      (if (zerop code)
+          (multiple-value-bind (c sha) (git "rev-parse" "--short" "HEAD")
+            (declare (ignore c))
+            (setf (revision-sha rev) sha)
+            (logf ";; committed ~a -> ~a  git ~a" id (file-namestring (revision-file rev)) sha))
+          (logf ";; wrote ~a (git commit failed: ~a)" (file-namestring (revision-file rev)) out)))
     rev))
+
+(defun heap-revision-id ()
+  (format nil "revision-~d-~d" (sxhash (definitions-source)) *generation*))
+
+(defun load-revision-history ()
+  "Read every revision file on disk into *REVISIONS*, oldest first, without evaluating any of them.
+   The files are the history; a process only adds to it."
+  (setf *revisions* (sort (mapcar #'read-revision-file (revision-files)) #'> :key #'revision-number)))
+
+(defun ensure-seed ()
+  "Make the heap load.lisp built the current revision. Commits only when no revision on disk has
+   the same id, so starting (or verifying) an unchanged world adds nothing to git."
+  (setf *current-revision* (or (find (heap-revision-id) *revisions* :key #'revision-id :test #'string=)
+                               (commit-revision "seed"))))
 
 (defun find-revision (key)
   (cond ((revision-p key) key)

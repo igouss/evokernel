@@ -9,5 +9,7 @@
   (load g))
 (evo.kernel:freeze-base)
 (setf sb-ext:*muffled-warnings* 'sb-kernel:redefinition-warning)
-;; revision 1 is always the seed, so there is always something to roll back to
-(evo.kernel:commit-revision "seed")
+;; the revisions on disk are the history; the seed is committed once, so there is always something
+;; to roll back to
+(evo.kernel:load-revision-history)
+(evo.kernel:ensure-seed)
