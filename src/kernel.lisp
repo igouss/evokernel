@@ -439,6 +439,39 @@ section: it tells you exactly which cases still fail. Fix those.")
   (handler-case (run-cmd "git" args)
     (error (c) (values 127 (format nil "~a" c)))))
 
+(defparameter *state-branch* "evo-state"
+  "The branch revisions are committed to, checked out at revisions/ as a git worktree. It is an
+   orphan: it shares no history with the code, so growing the world never commits to the code
+   branch.")
+
+(defun state-git (&rest args)
+  (apply #'git "-C" (namestring (revision-dir)) args))
+
+(defun ensure-revision-worktree ()
+  "Make revisions/ a worktree of *STATE-BRANCH*: keep it if it already is one, else check out the
+   local branch, else track origin's, else start the orphan branch. Refuse anything else there."
+  (let ((dir (revision-dir)) (branch *state-branch*))
+    (flet ((must (code out what) (unless (zerop code) (error "~a failed: ~a" what out))))
+      (cond ((probe-file (merge-pathnames ".git" dir))
+             (multiple-value-bind (code out) (state-git "symbolic-ref" "--short" "HEAD")
+               (unless (and (zerop code) (string= out branch))
+                 (error "~a is checked out on ~a, expected ~a" dir out branch))))
+            ((directory (merge-pathnames "*.*" dir))
+             (error "~a holds files but is not a worktree of ~a; move them aside" dir branch))
+            (t
+             (unless (zerop (git "rev-parse" "--is-inside-work-tree"))
+               (multiple-value-call #'must (git "init" "-q") "git init"))
+             (git "worktree" "prune")
+             (let ((path (namestring dir)))
+               (multiple-value-call #'must
+                 (cond ((zerop (git "rev-parse" "-q" "--verify" (format nil "refs/heads/~a" branch)))
+                        (git "worktree" "add" "-q" path branch))
+                       ((zerop (git "rev-parse" "-q" "--verify" (format nil "refs/remotes/origin/~a" branch)))
+                        (git "worktree" "add" "-q" "--track" "-b" branch path (format nil "origin/~a" branch)))
+                       (t (git "worktree" "add" "-q" "--orphan" "-b" branch path)))
+                 "git worktree add")
+               (logf ";; revisions/ is a worktree of ~a" branch)))))))
+
 (defun revision-files ()
   (directory (merge-pathnames "rev-*.lisp" (revision-dir))))
 
@@ -517,7 +550,7 @@ section: it tells you exactly which cases still fail. Fix those.")
             collect s)))
 
 (defun commit-revision (goal-name)
-  "Freeze the current heap as a revision: in-memory, on disk, in git."
+  "Freeze the current heap as a revision: in-memory, on disk, and as a commit on *STATE-BRANCH*."
   (let ((orphans (unsourced-functions)))
     (when orphans
       (error "refusing to commit: ~{~s~^, ~} live in the heap with no recorded source — the file would lie" orphans)))
@@ -529,17 +562,14 @@ section: it tells you exactly which cases still fail. Fix those.")
     (setf (revision-file rev) (write-revision-file rev))
     (push rev *revisions*)
     (setf *current-revision* rev)
-    (multiple-value-bind (code out) (git "rev-parse" "--is-inside-work-tree")
-      (declare (ignore out))
-      (unless (zerop code) (git "init" "-q")))
-    (git "add" (namestring (revision-file rev)))
+    (state-git "add" (file-namestring (revision-file rev)))
     (multiple-value-bind (code out)
-        (git "-c" "user.name=evokernel" "-c" "user.email=evokernel@localhost"
-             "commit" "-q" "--only" "-m"
-             (format nil "~a: ~a (generation ~d)" (revision-id rev) goal-name *generation*)
-             "--" (namestring (revision-file rev)))
+        (state-git "-c" "user.name=evokernel" "-c" "user.email=evokernel@localhost"
+                   "commit" "-q" "--only" "-m"
+                   (format nil "~a: ~a (generation ~d)" (revision-id rev) goal-name *generation*)
+                   "--" (file-namestring (revision-file rev)))
       (if (zerop code)
-          (multiple-value-bind (c sha) (git "rev-parse" "--short" "HEAD")
+          (multiple-value-bind (c sha) (state-git "rev-parse" "--short" "HEAD")
             (declare (ignore c))
             (setf (revision-sha rev) sha)
             (logf ";; committed ~a -> ~a  git ~a" id (file-namestring (revision-file rev)) sha))
@@ -552,6 +582,7 @@ section: it tells you exactly which cases still fail. Fix those.")
 (defun load-revision-history ()
   "Read every revision file on disk into *REVISIONS*, oldest first, without evaluating any of them.
    The files are the history; a process only adds to it."
+  (ensure-revision-worktree)
   (setf *revisions* (sort (mapcar #'read-revision-file (revision-files)) #'> :key #'revision-number)))
 
 (defun ensure-seed ()
