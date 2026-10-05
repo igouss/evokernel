@@ -36,6 +36,16 @@ check "process B numbers its revision past A's" '[ -n "$b" ] && [ "$b" -gt "${a:
 check "process B leaves A's file byte-identical" '[ -n "$sum_a" ] && sha256sum -c --quiet <<<"$sum_a" 2>/dev/null'
 check "a changed revision is still committed" '[ "$(commits)" -gt "$before" ]'
 
+out_r=$(lisp "(progn (evo.kernel:rollback ${a:-0}) (format t \"~&GOT ~a~%\" (world::reverse-string \"ab\")))")
+check "a later session rolls back to A's revision" 'grep -q "^GOT ba$" <<<"$out_r"'
+
+lisp '(progn
+  (sb-ext:run-program "sbcl" (list "--noinform" "--non-interactive" "--load" "load.lisp"
+                                   "--eval" (format nil "(evo.kernel:commit-revision ~s)" "other"))
+                      :search t)
+  (evo.kernel:commit-revision "overlap"))' >/dev/null
+check "overlapping sessions both keep their revision" 'grep -q "goal other " revisions/*.lisp && grep -q "goal overlap " revisions/*.lisp'
+
 sleep 1   # revision headers carry a timestamp in whole seconds; a same-second start would hide a re-commit
 before=$(commits)
 lisp '(sb-ext:exit)' >/dev/null
