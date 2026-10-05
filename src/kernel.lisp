@@ -21,7 +21,7 @@
            #:defgoal #:find-goal #:list-goals #:goal #:goal-name #:goal-description
            #:defproperty #:property-report
            #:run #:observe #:ask-model #:locked-p #:snapshot #:restore #:invariants #:goal-satisfied-p
-           #:commit-revision #:rollback #:revision #:revision-id #:revision-generation #:revision-file
+           #:commit-revision #:rollback #:revision #:revision-number #:revision-id #:revision-generation #:revision-file
            #:verify-fresh #:verify-in-process #:status-line #:evaluate #:seed-world #:freeze-base
            #:locked-form #:invariant-violation #:budget-exhausted))
 
@@ -423,7 +423,7 @@ section: it tells you exactly which cases still fail. Fix those.")
 ;;; Revisions: the image is truth at runtime, git is truth across time
 ;;; ------------------------------------------------------------------
 
-(defstruct revision id generation goal definitions state created file sha)
+(defstruct revision number id generation goal definitions state created file sha)
 
 (defun revision-dir () (merge-pathnames "revisions/" *project-root*))
 
@@ -440,7 +440,7 @@ section: it tells you exactly which cases still fail. Fix those.")
 
 (defun write-revision-file (rev)
   (ensure-directories-exist (revision-dir))
-  (let ((path (merge-pathnames (format nil "rev-~4,'0d.lisp" (length *revisions*)) (revision-dir))))
+  (let ((path (merge-pathnames (format nil "rev-~4,'0d.lisp" (revision-number rev)) (revision-dir))))
     (with-open-file (s path :direction :output :if-exists :supersede)
       (let ((*package* (find-package :world)) (*print-case* :downcase) (*print-right-margin* 100))
         (format s ";;;; ~a~%;;;; generation ~d  goal ~a  ~a~%;;;; Grown by the model, dumped by the kernel. Diff me.~%~%"
@@ -455,29 +455,41 @@ section: it tells you exactly which cases still fail. Fix those.")
                 (mapcar #'car (revision-definitions rev)))))
     path))
 
+(defun revision-from-forms (forms file)
+  "The revision that FORMS, read from a revision FILE, describe. Nothing is evaluated: the trailing
+   INSTALL-LOADED-REVISION form carries id, generation, goal and definition order, the SETF of
+   *STATE* carries the state, and the definer forms carry the source."
+  (let ((book (find-if (lambda (f) (and (consp f) (eq (car f) 'install-loaded-revision))) forms))
+        (state (find-if (lambda (f) (and (consp f) (eq (car f) 'setf) (eq (second f) 'world::*state*))) forms))
+        (sources (loop for f in forms for n = (defined-name f) when n collect (cons n f))))
+    (unless (and book state) (error "~a is not a revision file" file))
+    (destructuring-bind (id generation goal (quote-op names)) (rest book)
+      (declare (ignore quote-op))
+      (make-revision :number (parse-integer (pathname-name file) :start 4) :id id :generation generation
+                     :goal goal :state (second (second (third state))) :created "on disk" :file file
+                     :definitions (loop for n in names
+                                        collect (or (assoc n sources)
+                                                    (error "~a: no source for ~s" file n)))))))
+
+(defun read-revision-file (file)
+  (with-open-file (in file)
+    (let ((*package* (find-package :world)) (*read-eval* nil))
+      (revision-from-forms (loop for form = (read in nil in) until (eq form in) collect form)
+                           (truename file)))))
+
 (defun install-loaded-revision (id generation goal def-names)
   "Called at the end of a revision file when it is LOADed into a fresh image. The defuns are
    already live; re-read the file to recover their source so *definitions* (and therefore
-   observe/dump/commit) keep working in this image."
-  (let ((sources '()))
-    (when *load-truename*
-      (with-open-file (in *load-truename*)
-        (let ((*package* (find-package :world)) (*read-eval* nil))
-          (loop for form = (read in nil :eof)
-                until (eq form :eof)
-                do (let ((n (defined-name form)))
-                     (when n (push (cons n form) sources)))))))
-    (setf *generation* generation
-          *definitions* (loop for n in def-names
-                              collect (or (assoc n sources)
-                                          (cons n (list 'defun n '(&rest args) '(error "source not recorded")))))))
-  (push (make-revision :id id :generation generation :goal goal
-                       :definitions *definitions* :state (table->plist world::*state*)
-                       :created "loaded" :file (and *load-truename* (truename *load-truename*)))
-        *revisions*)
-  (setf *current-revision* (first *revisions*))
-  (logf ";; loaded revision ~a (generation ~d)" id generation)
-  id)
+   observe/dump/commit) keep working in this image. The arguments are data for
+   REVISION-FROM-FORMS; the file itself is the source of truth."
+  (declare (ignore id generation goal def-names))
+  (let ((rev (read-revision-file *load-truename*)))
+    (setf *generation* (revision-generation rev)
+          *definitions* (copy-list (revision-definitions rev)))
+    (push rev *revisions*)
+    (setf *current-revision* rev)
+    (logf ";; loaded revision ~a (generation ~d)" (revision-id rev) (revision-generation rev))
+    (revision-id rev)))
 
 (defun iso-now ()
   (multiple-value-bind (s m h d mo y) (get-decoded-time)
@@ -499,7 +511,8 @@ section: it tells you exactly which cases still fail. Fix those.")
       (error "refusing to commit: ~{~s~^, ~} live in the heap with no recorded source — the file would lie" orphans)))
   (let* ((defs (copy-list *definitions*))
          (id (format nil "revision-~d-~d" (sxhash (definitions-source)) *generation*))
-         (rev (make-revision :id id :generation *generation* :goal (string goal-name)
+         (rev (make-revision :number (1+ (length *revisions*)) :id id :generation *generation*
+                             :goal (string goal-name)
                              :definitions defs :state (table->plist world::*state*)
                              :created (iso-now))))
     (push rev *revisions*)
@@ -528,7 +541,7 @@ section: it tells you exactly which cases still fail. Fix those.")
 
 (defun find-revision (key)
   (cond ((revision-p key) key)
-        ((integerp key) (or (and (plusp key) (nth (1- key) (reverse *revisions*))) (error "no revision #~d" key)))
+        ((integerp key) (or (find key *revisions* :key #'revision-number) (error "no revision #~d" key)))
         (t (or (find (string key) *revisions* :key #'revision-id :test #'string=)
                (find (string key) *revisions* :key #'revision-sha :test #'equal)
                (error "no revision ~a" key)))))
@@ -588,7 +601,7 @@ section: it tells you exactly which cases still fail. Fix those.")
   (let ((*package* (find-package :world)) (*print-case* :upcase))
     (format nil "~a | revision ~d~@[ (~a)~]~a | generation ~d | budget ~d~%(:DATA ~s :DEFINITIONS ~s)~%Safety: ~s"
             (if (invariants) "IDLE" "UNSAFE")
-            (if *current-revision* (1+ (position *current-revision* (reverse *revisions*))) 0)
+            (if *current-revision* (revision-number *current-revision*) 0)
             (and *current-revision* (revision-id *current-revision*))
             (if (and *current-revision* (not (equal *generation* (revision-generation *current-revision*)))) "+drift" "")
             *generation* *budget*

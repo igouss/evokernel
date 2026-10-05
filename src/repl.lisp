@@ -59,9 +59,9 @@ the operator runs /run GOAL for that.")
 (defun print-revisions ()
   (if (null *revisions*)
       (format t "~&(none)~%")
-      (loop for rev in (reverse *revisions*) for i from 1
+      (loop for rev in (reverse *revisions*)
             do (format t "~&#~d  ~a  generation ~d  goal ~a~@[  git ~a~]~%"
-                       i (revision-id rev) (revision-generation rev)
+                       (revision-number rev) (revision-id rev) (revision-generation rev)
                        (evo.kernel::revision-goal rev) (evo.kernel::revision-sha rev)))))
 
 (defun handle (line)
