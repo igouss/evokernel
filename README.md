@@ -23,12 +23,14 @@ That is literally `evo.kernel:run` in `src/kernel.lisp`, with the plumbing left 
 
 ## Run it
 
-Requires `sbcl`, `curl`, `git`. No Quicklisp, no ASDF, no Lisp HTTP libraries (HTTP goes through
-curl, JSON is 150 lines of in-tree code).
+Requires `sbcl`, `curl`, `git`. The `claude-code` backend also needs the `claude` CLI, logged in.
+No Quicklisp, no ASDF, no Lisp HTTP libraries (HTTP goes through curl, JSON is 150 lines of in-tree
+code).
 
 ```sh
 ./run.sh demo                        # offline. scripted "model". no API key. ~5 s.
 EVO_BACKEND=anthropic ANTHROPIC_API_KEY=... ./run.sh          # real model, chat REPL
+EVO_BACKEND=claude-code ./run.sh     # real model via `claude -p`, uses your Claude Code login
 EVO_BACKEND=openai EVO_OPENAI_BASE_URL=http://localhost:11434/v1 EVO_MODEL=qwen2.5-coder ./run.sh   # ollama / llama.cpp / vllm
 EVO_BACKEND=manual ./run.sh          # YOU are the model. kernel prints the prompt, you type the form.
 ./run.sh verify 2 reverse-string     # fresh process, load revision 2, run the goal checks, exit 0/1
@@ -72,7 +74,7 @@ past the last committed revision.
 load.lisp                 loads everything, seeds the world, freezes base, commits revision 1
 src/json.lisp             JSON in/out, no deps
 src/kernel.lisp           WORLD package, lock check, snapshot/restore, goals, properties, run, revisions, git, rollback, fresh verify
-src/model.lisp            adapters: anthropic | openai-compatible | scripted | manual
+src/model.lisp            adapters: anthropic | openai-compatible | claude-code | scripted | manual
 src/repl.lisp             the chat> loop
 goals/reverse-string.lisp the demo goal: 21 fixed cases, 1000 generated, reverse/nreverse forbidden
 scripts/demo.lisp         the offline story

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run.sh — start the chat REPL, or run the offline demo.
-#   ./run.sh            chat REPL (needs EVO_BACKEND + key, see README)
+#   ./run.sh            chat REPL (needs EVO_BACKEND, see README)
 #   ./run.sh demo       offline scripted demo, no model needed
 #   ./run.sh verify N GOAL   fresh-process check of revision N
 set -euo pipefail

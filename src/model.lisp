@@ -1,9 +1,10 @@
 ;;;; model.lisp — the fuel pump. Adapters return (values text tokens-used).
 ;;;; HTTP goes through curl via run-program: zero Lisp HTTP/TLS deps.
+;;;; The claude-code adapter shells out to `claude -p` the same way, using its own auth.
 
 (defpackage :evo.model
   (:use :cl)
-  (:export #:make-anthropic #:make-openai #:make-scripted #:make-manual #:from-env))
+  (:export #:make-anthropic #:make-openai #:make-claude-code #:make-scripted #:make-manual #:from-env))
 
 (in-package :evo.model)
 
@@ -75,6 +76,35 @@
       (values (evo.json:jref reply "choices" 0 "message" "content")
               (or (evo.json:jref reply "usage" "total_tokens") 1)))))
 
+;;; ---------- Claude Code headless (`claude -p`): uses the CLI's login, no API key ----------
+
+(defun make-claude-code (&key (model (getenv "EVO_MODEL"))
+                              (program (getenv "EVO_CLAUDE_BIN" "claude")))
+  "Each call is a fresh, tool-less, settings-free `claude -p`: the model sees only SYSTEM and the
+observation, like the HTTP adapters. MODEL nil means the CLI's default."
+  (lambda (system messages)
+    (unless (and (= (length messages) 1) (equal (car (first messages)) "user"))
+      (error "claude-code adapter takes exactly one user message, got ~d" (length messages)))
+    (let* ((out (make-string-output-stream))
+           (err (make-string-output-stream))
+           (args (append (list "-p" "--output-format" "json" "--system-prompt" system
+                               "--tools" "" "--setting-sources" "" "--strict-mcp-config"
+                               "--no-session-persistence")
+                         (when model (list "--model" model))))
+           (p (sb-ext:run-program program args :search t :output out :error err
+                                               :input (make-string-input-stream (cdr (first messages)))))
+           (text (get-output-stream-string out))
+           (reply (handler-case (evo.json:decode text)
+                    (error () (error "claude -p exit ~d: ~a ~a" (sb-ext:process-exit-code p)
+                                     (subseq text 0 (min 300 (length text)))
+                                     (get-output-stream-string err))))))
+      (when (or (not (zerop (sb-ext:process-exit-code p))) (eq (evo.json:jref reply "is_error") :true))
+        (error "claude -p: ~a" (or (evo.json:jref reply "result") (evo.json:jref reply "subtype"))))
+      (values (evo.json:jref reply "result")
+              (loop for k in '("input_tokens" "cache_creation_input_tokens"
+                               "cache_read_input_tokens" "output_tokens")
+                    sum (or (evo.json:jref reply "usage" k) 0))))))
+
 ;;; ---------- Scripted: a canned sequence of replies. Offline demo + tests. ----------
 
 (defun make-scripted (replies)
@@ -105,9 +135,10 @@
               1))))
 
 (defun from-env ()
-  "Pick an adapter from EVO_BACKEND: anthropic | openai | manual."
+  "Pick an adapter from EVO_BACKEND: anthropic | openai | claude-code | manual."
   (let ((backend (string-downcase (getenv "EVO_BACKEND" "anthropic"))))
     (cond ((string= backend "anthropic") (make-anthropic))
           ((string= backend "openai") (make-openai))
+          ((string= backend "claude-code") (make-claude-code))
           ((string= backend "manual") (make-manual))
           (t (error "unknown EVO_BACKEND ~a" backend)))))
