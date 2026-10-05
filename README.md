@@ -4,8 +4,8 @@ A live SBCL image. The LLM is the hacker typing at its REPL. Every reply the mod
 evaluated into the running heap, and either kept (every safety property still holds) or rolled back
 (the heap is restored from a snapshot taken a moment earlier). When the goal's fixed cases and
 generated cases all pass, the heap is frozen as a revision: in memory, as a plain `.lisp` file, and
-as a git commit. A fresh SBCL process can load that file and re-run the checks. Rollback to any
-revision is live — no restart.
+as a commit on the `evo-state` branch. A fresh SBCL process can load that file and re-run the
+checks. Rollback to any revision, from this session or an earlier one, is live — no restart.
 
 Tokens are the fuel. This is the engine.
 
@@ -33,17 +33,23 @@ EVO_BACKEND=anthropic ANTHROPIC_API_KEY=... ./run.sh          # real model, chat
 EVO_BACKEND=claude-code ./run.sh     # real model via `claude -p`, uses your Claude Code login
 EVO_BACKEND=openai EVO_OPENAI_BASE_URL=http://localhost:11434/v1 EVO_MODEL=qwen2.5-coder ./run.sh   # ollama / llama.cpp / vllm
 EVO_BACKEND=manual ./run.sh          # YOU are the model. kernel prints the prompt, you type the form.
-./run.sh verify 2 reverse-string     # fresh process, load revision 2, run the goal checks, exit 0/1
+./run.sh verify 2 reverse-string     # fresh process, load revision 2, run the goal checks, exit 0/1/2
+./scripts/test-revisions.sh          # revision history outlives processes; starts add no commits
 ```
+
+`verify` exits 0 when the goal and the safety properties pass, 1 when they fail, 2 when the
+revision does not exist.
 
 The demo does the whole story from the thread, offline:
 
 1. model tries `(defun reverse-string (s) (reverse s))` → **LOCKED** (goal forbids `reverse`), heap untouched
 2. model writes a buggy version → **accepted** (no safety property broke), goal still fails, failure fed back
 3. model does `(setf (gethash :x *state*) -1)` → **REJECTED**, `nonnegative-counter` invariant tripped, heap restored
-4. model writes a correct version → 21 fixed + 1000 generated cases pass → **revision 2 committed** to git
-5. a fresh SBCL loads `revisions/rev-0002.lisp` and re-verifies → exit 0
-6. `(rollback 1)` → `reverse-string` is gone, `counter` survives; `(rollback 2)` → it's back. Same process throughout.
+4. model writes a correct version → 21 fixed + 1000 generated cases pass → **a new revision committed** to `evo-state`
+5. a fresh SBCL loads that revision's file and re-verifies → exit 0
+6. rollback to the seed → `reverse-string` is gone, `counter` survives; roll forward → it's back. Same process throughout.
+
+The demo commits to `evo-state` like any session, so each run adds one revision there.
 
 ## The REPL
 
@@ -71,14 +77,18 @@ past the last committed revision.
 ## Layout
 
 ```
-load.lisp                 loads everything, seeds the world, freezes base, commits revision 1
+load.lisp                 loads everything, seeds the world, freezes base, reads the revision history
 src/json.lisp             JSON in/out, no deps
 src/kernel.lisp           WORLD package, lock check, snapshot/restore, goals, properties, run, revisions, git, rollback, fresh verify
 src/model.lisp            adapters: anthropic | openai-compatible | claude-code | scripted | manual
 src/repl.lisp             the chat> loop
 goals/reverse-string.lisp the demo goal: 21 fixed cases, 1000 generated, reverse/nreverse forbidden
+goals/roman.lisp          Roman numerals both ways, FORMAT forbidden
+goals/life.lisp           one step of Conway's Game of Life, checked against random soups
+goals/brainfuck.lisp      a Brainfuck interpreter, checked on echo and reverse programs
 scripts/demo.lisp         the offline story
-revisions/rev-NNNN.lisp   what the model grew. plain defuns. git-tracked. diff them.
+scripts/test-revisions.sh separate processes against a throwaway copy: history, numbering, commits
+revisions/rev-NNNN.lisp   what the model grew. plain defuns. a worktree of evo-state. diff them.
 ```
 
 ## Design: image is truth at runtime, git is truth across time
@@ -90,10 +100,26 @@ The Smalltalk problem: once functions live in the image, the file is a lie. Answ
   gets accepted. The image is still what runs; this list is what gets dumped.
 - `commit-revision` writes `revisions/rev-NNNN.lisp`: `(in-package :world)`, the state as a plist,
   every definition pretty-printed, and one trailing bookkeeping call. Then `git add` + `git commit`
-  of that one file. `git log -p revisions/` is the model's growth history, defun by defun.
+  of that one file on `evo-state`. `git log -p evo-state` is the model's growth history, defun by
+  defun.
+- The files on disk are the revision history, not the process. At start, `load.lisp` reads every
+  revision file into `*revisions*` without evaluating it, so `/revisions`, `/rollback N` and
+  `/verify N` reach revisions from earlier sessions. A new revision takes the next number past
+  every file, and a revision file is never overwritten (`:if-exists :error`). The seed is committed
+  only when no revision on disk has its id, so starting or verifying an unchanged world adds no
+  commit. `scripts/test-revisions.sh` checks all of this across separate processes.
 - Loading a revision file in a fresh image evaluates the defuns normally, then
   `install-loaded-revision` re-reads the file to rebuild `*definitions*` — so the fresh image can
   observe, commit, and roll back exactly like the original.
+
+### The `evo-state` branch
+
+Revisions are committed to `evo-state`, an orphan branch that shares no history with the code, so
+growing the world never commits to the branch you work on. At start the kernel makes `revisions/`
+a git worktree of it: an existing worktree is kept, otherwise it checks out the local branch,
+otherwise it tracks `origin/evo-state`, otherwise it creates the branch. `revisions/` is ignored on
+the code branch. If `revisions/` holds files but is not that worktree, start refuses instead of
+touching them. Publish the history with `git push origin evo-state`.
 
 Rollback does not reload from disk. It restores `*base-snap*` (the world as it was right after
 seed + goals loaded), sets `*state*` from the revision, and re-evaluates the revision's definitions.
